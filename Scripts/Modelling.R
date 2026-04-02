@@ -1,0 +1,286 @@
+## ----setup, include = FALSE---------------------------------------------------------------------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(gridExtra)
+library(flextable)
+
+model_data <- read.csv(here::here("Data/model_data.csv")) |> dplyr::select(-X)
+
+split <- initial_split(model_data, prop = 0.8)
+train_data <- training(split)
+test_data <- testing(split)
+folds <- rsample::vfold_cv(train_data, v = 10)
+
+metrics <- yardstick::metric_set(rmse, mae)
+
+head(model_data)
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Baseline Frequency - Poisson glm
+
+
+freq_pois <- glm(
+  claim_count ~
+    driver_age +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data,
+  family = poisson(link = "log")
+)
+
+summary(freq_pois)
+
+# vehicle_age, not significant, gender not significant, luxury not significant given commerical.
+# All significant variables have negative coefficients (reduce frequency), compared to commerical, 0% claim discount, Urban.
+# AIC 14039
+deviance(freq_pois) / df.residual(freq_pois)
+# residual devience vs df is 0.222
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Next Frequency - Negative Binomial glm
+
+library(MASS)
+
+freq_nb <- glm.nb(
+  claim_count ~
+    driver_age +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data
+)
+
+summary(freq_nb)
+
+# vehicle_age not significant, gender not significant, luxury not significant given commerical.
+# All significant variables have negative coefficients (reduce frequency), compared to commerical, 0% claim discount, Urban.
+# AIC 14022
+deviance(freq_nb) / df.residual(freq_nb)
+# residual devience vs df is 0.195
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Comparison
+
+AIC(freq_pois, freq_nb)
+# Go with negative binomial for stronger variance assumption
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Improvements to model
+
+
+freq_nb_band <- glm.nb(
+  claim_count ~
+    age_bucket +
+    vehicle_age +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data
+)
+
+summary(freq_nb_band)
+
+# Similar interpretaion to before except the 65-80 age range has a strong negative coefficient, despite older drivers typically having higher frequencies.
+# AIC 14015 best so far
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Severity modelling - Gamma glm
+
+sev_data <- subset(model_data, claim_count > 0)
+
+sev_gamma <- glm(
+  avg_claim_sev ~
+    vehicle_age +
+    car_type +
+    region,
+  data = sev_data,
+  family = Gamma(link = "log")
+)
+
+summary(sev_gamma)
+# Dispersion is 0.422
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Diagnostic
+
+plot(sev_gamma$fitted.values,
+     residuals(sev_gamma, type = "deviance"),
+     xlab = "Fitted Severity",
+     ylab = "Deviance Residuals")
+abline(h = 0, col = "red")
+
+# Potential hetereoscedasticity, smaller variance at lower fitted severities.
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Pure Premium
+
+model_data$pred_freq <- predict(
+  freq_nb,
+  type = "response"
+)
+
+model_data$pred_sev <- predict(
+  sev_gamma,
+  newdata = gi_data,
+  type = "response"
+)
+
+
+model_data$pred_pure_premium <- gi_data$pred_freq * gi_data$pred_sev
+
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Validation and calibration
+
+mean(model_data$total_claim_cost)
+mean(model_data$pred_pure_premium) 
+
+# Very similar
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# By rating factor
+
+aggregate(
+  cbind(total_claim_cost, pred_pure_premium) ~ car_type,
+  data = gi_data,
+  mean
+)
+# Very Close
+
+aggregate(
+  cbind(total_claim_cost, pred_pure_premium) ~ region,
+  data = gi_data,
+  mean
+)
+# Quite Close
+
+aggregate(
+  cbind(total_claim_cost, pred_pure_premium) ~ no_claim_discount,
+  data = gi_data,
+  mean
+)
+# 0% and 40% off by 5% ish.
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+
+plot(
+  gi_data$pred_pure_premium,
+  gi_data$total_claim_cost,
+  col = rgb(0,0,0,0.05),
+  xlab = "Predicted",
+  ylab = "Actual"
+)
+abline(a = 0, b = 1, col = "red")
+
+gi_data |> 
+  filter(claim_count > 0) |> 
+  ggplot(aes(pred_pure_premium, total_claim_cost)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, colour = "red")
+
+# Under shoots a lot of claims
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Elastic net glm model matrix
+
+library(glmnet)
+
+X_freq <- model.matrix(
+  claim_count ~
+    driver_age +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount,
+  data = gi_data
+)[, -1]  # drop intercept
+
+y_freq <- gi_data$claim_count
+offset_freq <- log(gi_data$exposure)
+
+
+## ----cache=TRUE---------------------------------------------------------------------------------------------------------------------------------
+# Pricing Segmentation cuts (by modelled pure premium)
+
+model_data$pp_seg <- cut(
+  model_data$pred_pure_premium,
+  breaks = quantile(model_data$pred_pure_premium, probs = seq(0, 1, 0.20)),
+  include.lowest = TRUE,
+  labels = c("1-Very Low", "2-Low", "3-Medium", "4-High", "5-Very High"))
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Loss Ratio
+# Portfolio loss ratio equals target loss ratio
+
+target_LR <- 0.65
+
+PP <- sum(model_data$pred_pure_premium)
+C <- sum(model_data$total_claim_cost)
+k <- C / (PP * target_LR) # Scale factor
+
+model_data$charged_premium <- k * model_data$pred_pure_premium
+
+C / sum(model_data$charged_premium) # Check
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+# Loss ratio segment analysis
+
+model_data |> 
+  group_by(pp_seg) |> 
+  summarise(LR = sum(total_claim_cost)/sum(charged_premium),
+            avg_premium = mean(charged_premium),
+            average_claim = mean(total_claim_cost),
+            exposure_count = sum(exposure)) |> 
+  mutate(interpretation = case_when(
+    LR > target_LR ~ "underpriced",
+    LR < target_LR ~ "overpriced",
+    T ~ "priced_in"
+  )) |> 
+  flextable()
+
+model_data |> 
+  group_by(cluster_seg) |> 
+  summarise(LR = sum(total_claim_cost)/sum(charged_premium),
+            avg_premium = mean(charged_premium),
+            average_claim = mean(total_claim_cost),
+            exposure_count = sum(exposure)) |> 
+  mutate(interpretation = case_when(
+    LR > target_LR ~ "underpriced",
+    LR < target_LR ~ "overpriced",
+    T ~ "priced_in"
+  ))
+
+# The very low risk category is underpriced
+# Low risk category overpriced
+# Rest are ok
+
+
+## -----------------------------------------------------------------------------------------------------------------------------------------------
+write.csv(model_data, here("Data/model_data.csv"))
+
+knitr::purl("Modelling_glm.Rmd", here::here("Scripts/Modelling.R"))
+

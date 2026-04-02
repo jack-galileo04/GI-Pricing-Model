@@ -1,0 +1,234 @@
+---
+title: "Report"
+output: html_document
+---
+
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(gridExtra)
+library(flextable)
+library(here)
+library(MASS)
+
+library(gt)
+
+model_data <- read.csv(here("Data/model_data.csv")) |> dplyr::select(-X)
+```
+
+
+
+# Introduction
+
+The objective of this analysis is to construct an interpretable pricing model for a simulated general insurance motor portfolio using Generalised Linear Models (GLMs). The focus is on leveraging a simulated portfolio of policies to produce controlled loss ratios at predetermined targets and stable premiums. 
+
+
+# Data Overview
+
+The rating factors present in the data are:
+
+Driver age, vehicle age, gender, vehicle type, region and no claims discount.
+
+These will be used to model, along with the outcome variables constructing price levels as below.
+
+```{r}
+model_data |> 
+  summarise("Number of Policies" = 50000,
+            "Average Exposure" = mean(exposure),
+            "Average Claim Frequency" = mean(claim_count),
+            "Average Claim Severity" = mean(avg_claim_sev),
+            "Average Pure Premium" = mean(claim_count * avg_claim_sev)) |> 
+  gt()
+```
+
+
+
+# EDA
+
+Exploratory data analysis was performed to justify modelling choices. 
+
+```{r}
+gg_hist <- function(df, x) {
+  df |> 
+    ggplot(aes({{ x }})) + geom_histogram()
+  
+}
+
+p1<-model_data |> 
+  filter(claim_count > 0) |> 
+  ggplot(aes(avg_claim_sev)) + 
+  geom_histogram() +
+  labs(
+    x = "Average Claim Severity", y = "Count"
+  )
+
+p2<-gg_hist(model_data, driver_age) +
+  labs(
+    x = "Driver Age", y = "Count"
+  )
+
+p3<-gg_hist(model_data, vehicle_age)  +
+  labs(
+    x = "Vehicle Age", y = "Count"
+  )
+
+p4<-model_data |> 
+  filter(claim_count > 0) |> 
+  ggplot(aes(total_claim_cost)) + 
+  geom_histogram() +
+  labs(
+    x = "Total Claim Cost", y = "Count"
+  )
+
+grid.arrange(p1,p2,p3,p4, nrow = 2, top = "Continuous Variable Distribution")
+```
+```{r}
+gg_box <- function(df, x, y) {
+  df |> 
+    mutate({{ x }} := forcats::fct_reorder({{ x }}, {{ y }})) |> 
+    ggplot(aes({{ x }}, {{ y }})) + geom_boxplot()
+  
+}
+gg_scatter <- function(df, x, y) {
+  df |> 
+    ggplot(aes({{ x }}, {{ y }})) + geom_point()
+  
+}.
+
+p1 <- model_data |> 
+  filter(avg_claim_sev > 0) |> 
+  mutate(age_bucket = case_when(
+    driver_age <= 25 ~ "0-25",
+    driver_age > 25 & driver_age <= 40 ~ "26-40",
+    driver_age > 40 & driver_age <= 60 ~ "41-60",
+    driver_age > 60 ~ ">60"
+  )) |> 
+  mutate(age_bucket = fct_reorder(age_bucket, avg_claim_sev)) |> 
+  gg_box(x = age_bucket, y = avg_claim_sev) + 
+  scale_y_log10() +
+  labs(
+    x = "Age Brackets", y = "Average Claim Severity"
+  )
+
+p2 <- model_data |> 
+  filter(avg_claim_sev > 0) |> 
+  gg_scatter(x = vehicle_age, y = avg_claim_sev) + 
+  scale_y_log10() +
+  labs(
+    x = "Vehicle Age", y = "Average Claim Severity"
+  )
+
+
+p3 <- model_data |> 
+  filter(avg_claim_sev > 0) |> 
+  mutate(car_type = fct_reorder(car_type, avg_claim_sev)) |> 
+  gg_box(x = car_type, y = avg_claim_sev) + 
+  scale_y_log10() +
+  labs(
+    x = "Car Type", y = "Average Claim Severity"
+  )
+ 
+
+p4 <- model_data |> 
+  filter(avg_claim_sev > 0) |> 
+  mutate(region = fct_reorder(region, avg_claim_sev)) |> 
+  gg_box(x = region, y = avg_claim_sev) + 
+  scale_y_log10() +
+  labs(
+    x = "Region", y = "Average Claim Severity"
+  )
+ 
+
+grid.arrange(p1,p2,p3,p4, nrow = 2, top = "Bivariate Plots with Claim Severity")
+```
+```{r}
+p1 <- model_data |> 
+  mutate(claim_count = factor(claim_count)) |> 
+  gg_box(x = claim_count, y = driver_age) +
+  labs(
+    x = "Claim Count", y = "Driver Age"
+  )
+
+p2 <- model_data |> 
+  mutate(claim_count = factor(claim_count)) |> 
+  gg_box(x = claim_count, y = vehicle_age) +
+  labs(
+    x = "Claim Count", y = "Vehicle Age"
+  )
+
+p3 <- model_data |> 
+  group_by(no_claim_discount) |> 
+  summarise(mean_claim_count = mean(claim_count)) |> 
+  ggplot(aes(no_claim_discount, mean_claim_count)) +
+  geom_col() +
+  labs(
+    x = "No Claim Discount", y = "Average Claim Frequency"
+  )
+
+p4 <- model_data |> 
+  group_by(car_type) |> 
+  summarise(avg_claim_count = mean(claim_count)) |> 
+  mutate(car_type = fct_reorder(car_type, avg_claim_count)) |> 
+  ggplot(aes(car_type, avg_claim_count)) + geom_col() +
+  labs(
+    x = "Car Type", y = "Average Claim Frequency"
+  ) 
+
+p5 <- model_data |> 
+  group_by(gender) |> 
+  summarise(avg_claim_count = mean(claim_count)) |> 
+  mutate(gender = fct_reorder(gender, avg_claim_count)) |> 
+  ggplot(aes(gender, avg_claim_count)) + geom_col() +
+  labs(
+    x = "Gender", y = "Average Claim Frequency"
+  ) 
+
+p6 <- model_data |> 
+  group_by(region) |> 
+  summarise(avg_claim_count = mean(claim_count)) |> 
+  mutate(region = fct_reorder(region, avg_claim_count)) |> 
+  ggplot(aes(region, avg_claim_count)) + geom_col() +
+  labs(
+    x = "Region", y = "Average Claim Frequency"
+  ) 
+
+grid.arrange(p1,p2,p3,p4,p5,p6, nrow = 3, top = "Bivariate Plots with Claim Frequency")
+```
+
+
+# Modelling Framework
+
+This section explores the methods used to model pure premiums, an important input for price levels and loss ratio calculations.
+
+## Frequency-Severity Framework
+
+This analysis employs the frequency-severity framework, which models claim frequency and severity separately, and combines them to form a total claims cost estimate, otherwise known as, the pure premium.
+
+Pure Premium = (Average Claim Severity) * (Claim Frequency)
+
+## GLMs
+
+The discussed components were modelled using Generalised Linear Model (GLM) structures. 
+
+Frequency was modelled using a Negative Binomial GLM, with input variables as in the 'Bivariate Plots with Claim Frequency' figure. The exposure was also included as an input to ensure claim counts are relative to the time under the policy.
+
+# Results & Diagnostics
+
+## Frequency Model
+
+## Severity Model
+
+## Overall Model
+
+
+# Pricing Segmentation & Loss Ratio Scaling
+
+## Pricing Segmentation
+
+## Target Loss Ratio Scaling
+
+
+# Limitations & Conclusions

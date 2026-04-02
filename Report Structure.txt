@@ -1,0 +1,32 @@
+Report Structure:
+
+Executive Summary
+
+This report aims to model the pure premium of general insurance policies to construct pricing tables. The analysis began with exploratory data anlalysis to uncover underlying relationships, interaction effects and collinearity. These insights informed the modelling of the claim frequency and severity components, which was performed separately. A Poisson GLM model was used for claim frequency and a Random Forest for claim severity. The frequency model was selected using AIC, and the severity model was tuned using rmse as the primary metric. Final model selections were determined by the rmse scores, which were then analysed using variable importance, lift plots and partial dependence plots. Using these models, pricing tables were constructed using k means clustering and percentile segmentation of the fitted pure premiums. 
+
+Data Creation
+
+The synthetic data was simulated using simplified domain knowledge of general motor insurance. First, predictors were simulated using the distributions below:
+
+Using these, the outcome variables representing claim frequency and severity, were simulated using these variables as inputs based on domain knowledge as below.
+
+This data was synthetically created to roughly mimic real world data, by forming underlying relationships among random noise.
+
+
+Methodology
+
+- GLM
+
+- Random Forest
+
+EDA
+
+Results
+
+Pricing Tables
+
+Interpretation
+
+Underwriting Recommendations
+
+
