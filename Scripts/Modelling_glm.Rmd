@@ -9,18 +9,9 @@ knitr::opts_chunk$set(echo = TRUE, tidy = TRUE, warning = FALSE, message = FALSE
 library(tidyverse)
 library(tidymodels)
 library(gridExtra)
-library(flextable)
+library(gt)
 
 model_data <- read.csv(here::here("Data/model_data.csv")) |> dplyr::select(-X)
-
-split <- initial_split(model_data, prop = 0.8)
-train_data <- training(split)
-test_data <- testing(split)
-folds <- rsample::vfold_cv(train_data, v = 10)
-
-metrics <- yardstick::metric_set(rmse, mae)
-
-head(model_data)
 ```
 
 ```{r}
@@ -143,12 +134,12 @@ model_data$pred_freq <- predict(
 
 model_data$pred_sev <- predict(
   sev_gamma,
-  newdata = gi_data,
+  newdata = model_data,
   type = "response"
 )
 
 
-model_data$pred_pure_premium <- gi_data$pred_freq * gi_data$pred_sev
+model_data$pred_pure_premium <- model_data$pred_freq * model_data$pred_sev
 
 ```
 
@@ -166,21 +157,21 @@ mean(model_data$pred_pure_premium)
 
 aggregate(
   cbind(total_claim_cost, pred_pure_premium) ~ car_type,
-  data = gi_data,
+  data = model_data,
   mean
 )
 # Very Close
 
 aggregate(
   cbind(total_claim_cost, pred_pure_premium) ~ region,
-  data = gi_data,
+  data = model_data,
   mean
 )
 # Quite Close
 
 aggregate(
   cbind(total_claim_cost, pred_pure_premium) ~ no_claim_discount,
-  data = gi_data,
+  data = model_data,
   mean
 )
 # 0% and 40% off by 5% ish.
@@ -189,41 +180,21 @@ aggregate(
 ```{r}
 
 plot(
-  gi_data$pred_pure_premium,
-  gi_data$total_claim_cost,
+  model_data$pred_pure_premium,
+  model_data$total_claim_cost,
   col = rgb(0,0,0,0.05),
   xlab = "Predicted",
   ylab = "Actual"
 )
 abline(a = 0, b = 1, col = "red")
 
-gi_data |> 
+model_data |> 
   filter(claim_count > 0) |> 
   ggplot(aes(pred_pure_premium, total_claim_cost)) +
   geom_point() +
   geom_abline(intercept = 0, slope = 1, colour = "red")
 
 # Under shoots a lot of claims
-```
-
-```{r}
-# Elastic net glm model matrix
-
-library(glmnet)
-
-X_freq <- model.matrix(
-  claim_count ~
-    driver_age +
-    vehicle_age +
-    gender +
-    car_type +
-    region +
-    no_claim_discount,
-  data = gi_data
-)[, -1]  # drop intercept
-
-y_freq <- gi_data$claim_count
-offset_freq <- log(gi_data$exposure)
 ```
 
 ```{r, cache=TRUE}
@@ -265,7 +236,7 @@ model_data |>
     LR < target_LR ~ "overpriced",
     T ~ "priced_in"
   )) |> 
-  flextable()
+  gt()
 
 model_data |> 
   group_by(cluster_seg) |> 

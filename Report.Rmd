@@ -1,6 +1,6 @@
 ---
 title: "Report"
-output: html_document
+output: pdf_document
 ---
 
 
@@ -9,10 +9,12 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
 library(tidyverse)
+library(grid)
 library(gridExtra)
 library(flextable)
 library(here)
 library(MASS)
+library(effects)
 
 library(gt)
 
@@ -32,7 +34,7 @@ The rating factors present in the data are:
 
 Driver age, vehicle age, gender, vehicle type, region and no claims discount.
 
-These will be used to model, along with the outcome variables constructing price levels as below.
+These will be used to model, along with the outcome variables for constructing price levels as below.
 
 ```{r}
 model_data |> 
@@ -40,8 +42,7 @@ model_data |>
             "Average Exposure" = mean(exposure),
             "Average Claim Frequency" = mean(claim_count),
             "Average Claim Severity" = mean(avg_claim_sev),
-            "Average Pure Premium" = mean(claim_count * avg_claim_sev)) |> 
-  gt()
+            "Average Pure Premium" = mean(claim_count * avg_claim_sev))
 ```
 
 
@@ -50,41 +51,8 @@ model_data |>
 
 Exploratory data analysis was performed to justify modelling choices. 
 
-```{r}
-gg_hist <- function(df, x) {
-  df |> 
-    ggplot(aes({{ x }})) + geom_histogram()
-  
-}
+In the figure below, we have bivariate plots to analyse the relationships between certain rating factors and *Claim Severity*, based on domain knowledge. The relationship between *Age Brackets* and *Claim Severity* is slightly increasing with age. *Vehicle Age* and *Claim Severity* have a positive relationship. Luxury and Commerical *Car Types* are associated with higher *Claim Severity*. Finally a more rural *Region* is observed to have higher *Claim Severity*
 
-p1<-model_data |> 
-  filter(claim_count > 0) |> 
-  ggplot(aes(avg_claim_sev)) + 
-  geom_histogram() +
-  labs(
-    x = "Average Claim Severity", y = "Count"
-  )
-
-p2<-gg_hist(model_data, driver_age) +
-  labs(
-    x = "Driver Age", y = "Count"
-  )
-
-p3<-gg_hist(model_data, vehicle_age)  +
-  labs(
-    x = "Vehicle Age", y = "Count"
-  )
-
-p4<-model_data |> 
-  filter(claim_count > 0) |> 
-  ggplot(aes(total_claim_cost)) + 
-  geom_histogram() +
-  labs(
-    x = "Total Claim Cost", y = "Count"
-  )
-
-grid.arrange(p1,p2,p3,p4, nrow = 2, top = "Continuous Variable Distribution")
-```
 ```{r}
 gg_box <- function(df, x, y) {
   df |> 
@@ -96,7 +64,7 @@ gg_scatter <- function(df, x, y) {
   df |> 
     ggplot(aes({{ x }}, {{ y }})) + geom_point()
   
-}.
+}
 
 p1 <- model_data |> 
   filter(avg_claim_sev > 0) |> 
@@ -144,6 +112,8 @@ p4 <- model_data |>
 
 grid.arrange(p1,p2,p3,p4, nrow = 2, top = "Bivariate Plots with Claim Severity")
 ```
+In the figure below, we have bivariate plots to analyse the relationships between certain rating factors and *Claim Frequency*, based on domain knowledge. The relationship between *Age Brackets* and *Claim Frequency* is increasing with age. *Vehicle Age* and *Claim Frequency* have a slight positive relationship. Luxury and Commercial *Car Types* are associated with higher *Claim Frequency*. A larger *No Claims Discount* is associated with a lower *Claim Frequency*. Males typically have higher *Claim Frequency*. Finally, a more urban *Region* is observed to have higher *Claim Frequency*.
+
 ```{r}
 p1 <- model_data |> 
   mutate(claim_count = factor(claim_count)) |> 
@@ -215,20 +185,271 @@ The discussed components were modelled using Generalised Linear Model (GLM) stru
 
 Frequency was modelled using a Negative Binomial GLM, with input variables as in the 'Bivariate Plots with Claim Frequency' figure. The exposure was also included as an input to ensure claim counts are relative to the time under the policy.
 
+Severity was modelled using a Gamma GLM, with input variables as in the 'Bivariate Plots with Claim Severity'.
+
+
 # Results & Diagnostics
+The discussed modelling techniques were applied and analysed.
 
 ## Frequency Model
 
+Using AIC as out main model selection metric, and simultaneously aiming to minimise devience, the Negative Binomial GLM with age banding was selected.
+
+```{r}
+freq_pois <- glm(
+  claim_count ~
+    driver_age +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data,
+  family = poisson(link = "log")
+)
+
+freq_pois_band <- glm(
+  claim_count ~
+    age_bucket +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data,
+  family = poisson(link = "log")
+)
+
+freq_nb <- glm.nb(
+  claim_count ~
+    driver_age +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data
+)
+
+freq_nb_band <- glm.nb(
+  claim_count ~
+    age_bucket +
+    vehicle_age +
+    gender +
+    car_type +
+    region +
+    no_claim_discount +
+    offset(log(exposure)),
+  data = model_data
+)
+```
+
+```{r}
+tibble(
+  Poisson = deviance(freq_pois) / df.residual(freq_pois),
+  "Negative Binomial" = deviance(freq_nb) / df.residual(freq_nb),
+  "Poisson (Age Band)" = deviance(freq_pois_band) / df.residual(freq_pois_band),
+  "Negative Binomial (Age Band)" = deviance(freq_nb_band) / df.residual(freq_nb_band)
+  ) |> 
+  pivot_longer(cols = 1:4, names_to = "Model", values_to = "Devience") |> 
+  bind_cols(
+    AIC(freq_pois, freq_nb, freq_pois_band, freq_nb_band) |> 
+  rename("Degrees of Freedom" = df)
+  ) |> 
+  mutate(Devience = round(Devience, 2)) |> 
+  arrange(AIC)
+```
+
+The figure below demonstrates the marginal effect of each predictor, on the *Claim Frequency*, holding other predictors in the model constant. Notice that the observed relationships from the exploratory data analysis hold here, but with a U shaped relationship between *Driver Age* and *Claim Frequency*.
+
+
+```{r, fig.height = 9, fig.width = 10}
+p1<-plot(effect("vehicle_age", freq_nb_band))
+p2<-plot(effect("car_type", freq_nb_band))
+p3<-plot(effect("age_bucket", freq_nb_band))
+p4<-plot(effect("region", freq_nb_band))
+p5<-plot(effect("no_claim_discount", freq_nb_band))
+p6<-plot(effect("gender", freq_nb_band))
+
+grid.arrange(p1,p2,p3,p4,p5,p6, nrow = 3, 
+             top = textGrob("Partial Effect Plots",
+                            gp = gpar(fontsize = 20)))
+```
+
 ## Severity Model
 
+This section uses a Gamma GLM to model *Claim Severity*, using the variables discussed in the exploratory data analysis. Driver age was left out of the severity model, as it was found to be insignificant given the inclusion of other variables.
+
+```{r}
+sev_data <- subset(model_data, claim_count > 0)
+
+sev_gamma <- glm(
+  avg_claim_sev ~
+    vehicle_age +
+    car_type +
+    region,
+  data = sev_data,
+  family = Gamma(link = "log")
+)
+```
+
+The figure below is a diagnostic plot of Devience Residuals vs Fitted Severity. Clearly, the density of predictions decreases as we get more extreme rating factors, making heteroscedasticity appear more prominent. However, the lack of density makes it difficult to determine this, and the more observable issue is the trend of undershooting on larger predictions.
+
+```{r}
+
+plot(sev_gamma$fitted.values,
+     residuals(sev_gamma, type = "deviance"),
+     pch = 16,
+     xlab = "Fitted Severity",
+     ylab = "Deviance Residuals")
+abline(h = 0, col = "red")
+
+# Potential hetereoscedasticity, smaller variance at lower fitted severities.
+```
+The partial effect plots support the relationships observed in the exploratory data analysis. 
+
+```{r, fig.height = 9}
+p1<-plot(effect("vehicle_age", sev_gamma))
+p2<-plot(effect("car_type", sev_gamma))
+p3<-plot(effect("region", sev_gamma))
+
+grid.arrange(p1,p2,p3, nrow = 3, top = textGrob("Partial Effect Plots",
+                                                gp = gpar(fontsize = 20)))
+```
+
 ## Overall Model
+
+```{r}
+model_data$pred_freq <- predict(
+  freq_nb,
+  type = "response"
+)
+
+model_data$pred_sev <- predict(
+  sev_gamma,
+  newdata = model_data,
+  type = "response"
+)
+
+model_data$pred_pure_premium <- model_data$pred_freq * model_data$pred_sev
+```
+
+Upon finalising the *Claim Frequency* and *Claim Severity* models, we calculate the fitted *Pure Premiums*. The mean *Pure Premium* aligns well with the mean *Total Claim Cost*, implying the aggregate fit is reasonable when disregarding segments, and tails.
+
+```{r}
+# Validation and calibration
+
+tibble(
+  "Mean Real Claim Cost" = round(mean(model_data$total_claim_cost),2),
+  "Mean Fitted Pure Premium" = round(mean(model_data$pred_pure_premium),2)
+) |> 
+  mutate("% Difference" = `Mean Real Claim Cost` / `Mean Fitted Pure Premium` * 100)
+```
+
+When analysing by rating factor, the differences between the real and fitted *Pure Premiums* can be dissected to individual components of predictors. The only causes for concern in aggregations by rating factor are errors in 60% *no_discount_claim* and Rural *Region*, as these are large in comparison to the overall error.
+
+```{r}
+# By rating factor
+
+aggregate(
+  cbind(total_claim_cost = round(total_claim_cost,2), pred_pure_premium = round(pred_pure_premium,2)) ~ car_type,
+  data = model_data,
+  mean
+) |> 
+  mutate("% Difference" = pred_pure_premium / total_claim_cost * 100) |> 
+  rename("Mean Total Claim Cost" = 2, "Mean Predicted Pure Premium" = 3)
+# Very Close
+
+aggregate(
+  cbind(total_claim_cost = round(total_claim_cost,2), pred_pure_premium = round(pred_pure_premium,2)) ~ region,
+  data = model_data,
+  mean
+) |> 
+  mutate("% Difference" = pred_pure_premium / total_claim_cost * 100) |> 
+  rename("Mean Total Claim Cost" = 2, "Mean Predicted Pure Premium" = 3)
+# Quite Close
+
+aggregate(
+  cbind(total_claim_cost = round(total_claim_cost,2), pred_pure_premium = round(pred_pure_premium,2)) ~ no_claim_discount,
+  data = model_data,
+  mean
+) |> 
+  mutate("% Difference" = pred_pure_premium / total_claim_cost * 100) |> 
+  rename("Mean Total Claim Cost" = 2, "Mean Predicted Pure Premium" = 3)
+# 0% and 40% off by 5% ish.
+```
 
 
 # Pricing Segmentation & Loss Ratio Scaling
 
-## Pricing Segmentation
+```{r, cache=TRUE}
+# Pricing Segmentation cuts (by modelled pure premium)
 
-## Target Loss Ratio Scaling
+model_data$pp_seg <- cut(
+  model_data$pred_pure_premium,
+  breaks = quantile(model_data$pred_pure_premium, probs = seq(0, 1, 0.20)),
+  include.lowest = TRUE,
+  labels = c("1-Very Low", "2-Low", "3-Medium", "4-High", "5-Very High"))
+```
 
+```{r}
+# Loss Ratio
+# Portfolio loss ratio equals target loss ratio
+
+target_LR <- 0.65
+
+PP <- sum(model_data$pred_pure_premium)
+C <- sum(model_data$total_claim_cost)
+k <- C / (PP * target_LR) # Scale factor
+
+model_data$charged_premium <- k * model_data$pred_pure_premium
+
+C / sum(model_data$charged_premium) # Check
+```
+
+In this section, we scale the pure premiums to the price levels required to meet the target loss ratio of 65%. 
+
+The pure premiums are first scaled such that the overall loss ratio in the portfolio meets the target 65%. The portfolio is then categorised into quintiles based on the fitted pure premiums, representing overall rating factors deduced by the model for each segment. 
+
+In the figure below, the individual segments can be analysed to help determine which subset of policies are being mispriced by the model. It is observed that *Very-Low* risk policies are the most most misspriced, as the model underestimates this segments total claim costs. 
+
+```{r}
+# Loss ratio segment analysis
+
+model_data |> 
+  group_by(pp_seg) |> 
+  summarise(LR = sum(total_claim_cost)/sum(charged_premium),
+            avg_premium = mean(charged_premium),
+            average_claim = mean(total_claim_cost),
+            exposure_count = sum(exposure)) |> 
+  mutate(interpretation = case_when(
+    LR > target_LR ~ "underpriced",
+    LR < target_LR ~ "overpriced",
+    T ~ "priced_in"
+  )) |> 
+  mutate(across(is.numeric, ~ round(.x, 2))) |> 
+  rename(
+    "Pure Premium Segment" = pp_seg,
+    "Loss Ratio" = LR,
+    "Average Premium" = avg_premium,
+    "Average Claim" = average_claim,
+    "Total Exposure (years)" = exposure_count,
+    "Evaluation" = interpretation)
+```
 
 # Limitations & Conclusions
+
+This analysis is subject to many limitations which should be considered when interpreting the results.
+
+First, the analysis is based on simulated portfolio data, meant to reflect realistic general insurance claim behaviour. While this allows clear illustration of modelling techniques and pricing decisions, results should not be interpreted as representative of any specific real-world portolio.
+
+Second, the modelling is restricted to cross-sectional GLMs only, with no allowance for temporal effects like seasonality or inflation. Further, general modelling frameworks have been mostly disregarded in order to illustrate pure GLM modelling. More extensive model comparisons, data set splits and diagnostic examination would need to be utilised for a more thorough analysis.
+
+Third, the pricing outcomes focus on pure premium estimation and loss ratio scaling, and do not explicitly incorporate additional commercial components such as expense loadings, profit margins, reinsurance costs, or regulatory constraints.
+
+Finally, pricing segmentation is intentionally coarse, prioritising stability and interpretability over maximum risk differentiation. In a production environment, segmentation would typically be refined through iteration, governance review, and commercial feedback.
+
+Overall, this analysis demonstrates the development of a practical general insurance pricing framework, using a GLM-based frequency-severity approach. Claim frequency is modelled using several alternative GLM specifications to assess the impact of distributional assumptions and penalisation on stability and pricing relativities, while claim severity is modelled using a Gamma GLM to provide a transparent and interpretable foundation for pure premium estimation. Exploratory analysis is deliberately targeted to justify variable selection rather than exhaustively explore the data, ensuring the focus remains on pricing outcomes. The resulting pure premiums are used to define coarse pricing segments and scaled to achieve a target portfolio loss ratio, illustrating how technical model outputs can be translated into commercially meaningful premiums. 
